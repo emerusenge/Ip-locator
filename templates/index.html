@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}Géolocalisation IP{% endblock %}
+
+{% block content %}
+<h1 class="mb-4 text-secondary">🌍 Géolocalisation IP</h1>
+
+<form method="post" id="ip-form" action="javascript:void(0);" class="row g-3 mb-4">
+  <div class="col-md-6">
+    <input type="text" name="ip" class="form-control" placeholder="Ex : 8.8.8.8" required>
+  </div>
+  <div class="col-md-6">
+    <input type="email" name="email" class="form-control" placeholder="Votre adresse e-mail" required>
+  </div>
+  <div class="col-12">
+    <button class="btn btn-info w-100" type="submit">Localiser</button>
+  </div>
+</form>
+
+<div id="info" style="display:none;" class="card mb-4 shadow-sm">
+  <div class="card-body">
+    <p><strong>Pays :</strong> <span id="pays"></span></p>
+    <p><strong>Ville :</strong> <span id="ville"></span></p>
+    <p><strong>FAI :</strong> <span id="fai"></span></p>
+    <p><strong>Latitude :</strong> <span id="latitude"></span></p>
+    <p><strong>Longitude :</strong> <span id="longitude"></span></p>
+    <p><strong>Altitude (m) :</strong> <span id="altitude"></span></p>
+  </div>
+</div>
+
+<div id="map" style="height:400px;" class="mb-3 position-relative"></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script>
+  const form = document.getElementById('ip-form');
+  const infoCard = document.getElementById('info');
+
+  let map = null;
+  let polyline = null;
+  let pollingInterval = null;
+  let destinationCountry = "";
+  let markersGroup = null;
+  let infoControl = null;
+  let sourceLatLng = [-3.38, 29.36];  // Bujumbura
+  let destLatLng = null;
+
+  form.addEventListener('submit', function(e){
+    e.preventDefault();
+    if (pollingInterval) clearInterval(pollingInterval);
+    if (map) map.remove();
+
+    fetch('/start_path', {
+      method: 'POST',
+      body: new URLSearchParams(new FormData(form))
+    })
+    .then(res => res.json())
+    .then(data => {
+      if(data.error){
+        alert(data.error);
+        return;
+      }
+
+      destinationCountry = data.country_name;
+
+      document.getElementById('pays').textContent = data.country_name ?? 'N/A';
+      document.getElementById('ville').textContent = data.city ?? 'N/A';
+      document.getElementById('fai').textContent = '(ISP non disponible)';
+      document.getElementById('latitude').textContent = data.latitude ?? 'N/A';
+      document.getElementById('longitude').textContent = data.longitude ?? 'N/A';
+      document.getElementById('altitude').textContent = data.altitude ?? 'N/A';
+
+      infoCard.style.display = "block";
+
+      // Ajout des provinces si la destination est au Burundi
+      if (data.provinces && data.provinces.length > 0) {
+        const hr = document.createElement("hr");
+        const provincesTitle = document.createElement("p");
+        provincesTitle.innerHTML = "<strong>Provinces traversées au Burundi :</strong>";
+
+        const provincesList = document.createElement("ul");
+        data.provinces.forEach(prov => {
+          const li = document.createElement("li");
+          li.textContent = prov;
+          provincesList.appendChild(li);
+        });
+
+        infoCard.querySelector('.card-body').appendChild(hr);
+        infoCard.querySelector('.card-body').appendChild(provincesTitle);
+        infoCard.querySelector('.card-body').appendChild(provincesList);
+      }
+
+      map = L.map('map').setView([0, 20], 3);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+      markersGroup = L.layerGroup().addTo(map);
+
+      const path = data.path.map(p => [p.lat, p.lon]);
+      destLatLng = path[path.length - 1];
+
+      const fullPath = [sourceLatLng, ...path];
+      polyline = L.polyline(fullPath, { color: '#007bff', weight: 4 }).addTo(map);
+      map.fitBounds(polyline.getBounds());
+
+      // Marqueur de départ
+      L.marker(sourceLatLng, {
+        icon: L.icon({
+          iconUrl: "http://maps.google.com/mapfiles/ms/icons/green-dot.png",
+          iconSize: [24, 24],
+          iconAnchor: [12, 24]
+        })
+      }).addTo(markersGroup).bindPopup("Burundi (Point de départ)");
+
+      // Marqueur de destination
+      L.marker(destLatLng, {
+        icon: L.icon({
+          iconUrl: "http://maps.google.com/mapfiles/ms/icons/blue-dot.png",
+          iconSize: [24, 24],
+          iconAnchor: [12, 24]
+        })
+      }).addTo(markersGroup).bindPopup("Destination");
+
+      // Boîte d'info distance et temps
+      if (infoControl) {
+        map.removeControl(infoControl);
+      }
+
+      infoControl = L.control({ position: 'topright' });
+      infoControl.onAdd = function () {
+        const div = L.DomUtil.create('div', 'leaflet-control-custom bg-white p-2 rounded shadow-sm');
+        div.innerHTML = `
+          <div><strong>Distance :</strong> ${data.distance_km} km</div>
+          <div><strong>Temps de vol :</strong> ${data.flight_time} h</div>
+        `;
+        return div;
+      };
+      infoControl.addTo(map);
+
+      map.setZoom(2);
+      startPolling();
+    });
+  });
+
+  function startPolling(){
+    pollingInterval = setInterval(() => {
+      fetch('/progress')
+      .then(res => res.json())
+      .then(countries => {
+        markersGroup.clearLayers();
+
+        // Replacer marqueurs départ/destination
+        L.marker(sourceLatLng, {
+          icon: L.icon({
+            iconUrl: "http://maps.google.com/mapfiles/ms/icons/green-dot.png",
+            iconSize: [24, 24],
+            iconAnchor: [12, 24]
+          })
+        }).addTo(markersGroup).bindPopup("Burundi (Point de départ)");
+
+        if (destLatLng) {
+          L.marker(destLatLng, {
+            icon: L.icon({
+              iconUrl: "http://maps.google.com/mapfiles/ms/icons/blue-dot.png",
+              iconSize: [24, 24],
+              iconAnchor: [12, 24]
+            })
+          }).addTo(markersGroup).bindPopup("Destination");
+        }
+
+        // Marqueurs rouges pays survolés
+        countries.forEach(c => {
+          if (c.lat && c.lon) {
+            L.marker([c.lat, c.lon], {
+              icon: L.icon({
+                iconUrl: "http://maps.google.com/mapfiles/ms/icons/red-dot.png",
+                iconSize: [24, 24],
+                iconAnchor: [12, 24]
+              })
+            }).addTo(markersGroup).bindPopup(`<strong>Pays survolé :</strong> ${c.name}`);
+          }
+        });
+
+        if(countries.length > 0 && countries[countries.length - 1].name === destinationCountry){
+          clearInterval(pollingInterval);
+        }
+      });
+    }, 2000);
+  }
+</script>
+
+<style>
+  .leaflet-control-custom {
+    font-size: 14px;
+    background-color: white;
+    border: 1px solid #ccc;
+    padding: 8px;
+    min-width: 160px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.15);
+  }
+</style>
+{% endblock %}
